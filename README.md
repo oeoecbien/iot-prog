@@ -13,8 +13,8 @@ Ce projet propose un jeu distribué de détection d'espion entre plusieurs capte
 
 ## Installation
 
-1. Installe Python 3.x sur chaque machine.
-2. Installe les dépendances :
+1. Installez Python 3.x sur chaque machine.
+2. Installez les dépendances :
    ```sh
    pip install -r tp_jeu/requirements.txt
    ```
@@ -23,7 +23,7 @@ Ce projet propose un jeu distribué de détection d'espion entre plusieurs capte
 
 ### 1. Nettoyage du broker MQTT (optionnel mais recommandé)
 
-Avant chaque partie, lance le nettoyage :
+Avant chaque partie, lancez le nettoyage :
 ```sh
 python tp_jeu/cleanup_mqtt.py
 ```
@@ -37,7 +37,7 @@ python tp_jeu/server.py
 
 ### 3. Démarrage des capteurs
 
-Sur chaque Raspberry Pi (ou machine simulant un capteur), lance :
+Sur chaque Raspberry Pi (ou machine simulant un capteur), lancez :
 ```sh
 python tp_jeu/capteur.py <id_capteur>
 ```
