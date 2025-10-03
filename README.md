@@ -71,4 +71,4 @@ python tp_jeu/capteur.py rpi1
 
 ## Auteur
 
-Projet pédagogique IoT
+Nathan AMARAL, Melih CETINKAYA, Mehdi FADHLOUNE & Armand RAZAFINDRAIBE
