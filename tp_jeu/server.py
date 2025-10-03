@@ -12,13 +12,13 @@ if sys.stdout.encoding != 'utf-8':
 class ServeurArbitre:
     """
     Serveur arbitre du jeu distribué de détection d'espion.
-    
+
     Responsabilités :
     - Gestion de la connexion des capteurs
     - Attribution aléatoire des rôles (normal/espion)
     - Collecte et analyse des votes
     - Détermination du gagnant
-    
+
     Hébergé sur : 10.109.150.133
     """
 
@@ -78,19 +78,18 @@ class ServeurArbitre:
         Évite les conflits avec d'anciennes données.
         """
         topics_a_nettoyer = [
-            "iot/config",
-            "iot/debat/arguments"
+            "iot/config"
         ]
-        
-        # Topics des rôles
+
+        # Topics des rôles et données
         for capteur_id in self.capteurs_ids:
             topics_a_nettoyer.append(f"iot/role/{capteur_id}")
             topics_a_nettoyer.append(f"iot/capteurs/{capteur_id}/temperature")
             topics_a_nettoyer.append(f"iot/votes/{capteur_id}")
-        
+
         for topic in topics_a_nettoyer:
             self.client.publish(topic, "", qos=1, retain=True)
-        
+
         time.sleep(0.5)
 
     def on_message(self, client, userdata, msg):
@@ -113,187 +112,145 @@ class ServeurArbitre:
         except json.JSONDecodeError as e:
             print(f"[SERVEUR] Erreur de décodage JSON : {e}")
         except Exception as e:
-            print(f"[SERVEUR] Erreur lors du traitement du message : {e}")
+            print(f"[SERVEUR] Erreur traitement message : {e}")
 
     def traiter_presence(self, capteur_id, payload):
-        """
-        Traite un message de présence d'un capteur.
-        Démarre la partie lorsque tous les capteurs sont connectés.
-        """
-        if capteur_id not in self.capteurs_ids:
-            return
-
-        if capteur_id in self.capteurs_connectes:
-            return  # Capteur déjà enregistré
-
-        self.capteurs_connectes.add(capteur_id)
-        capteur_ip = self.capteurs_ips[capteur_id]
-        print(f"[SERVEUR] {capteur_id} ({capteur_ip}) connecté "
-              f"[{len(self.capteurs_connectes)}/{len(self.capteurs_ids)}]")
-
-        # Démarrage de la partie si tous les capteurs sont connectés
-        if len(self.capteurs_connectes) == len(self.capteurs_ids) and not self.partie_en_cours:
-            print(f"[SERVEUR] Tous les capteurs sont connectés, démarrage dans 3 secondes...\n")
-            time.sleep(3)
-            self.demarrer_jeu()
-
-    def traiter_vote(self, capteur_id, payload):
-        """
-        Traite un vote reçu d'un capteur.
-        Détermine le gagnant lorsque tous les votes sont reçus.
-        """
-        if capteur_id not in self.capteurs_ids:
-            return
-
-        if capteur_id in self.votes:
-            return  # Vote déjà enregistré
-
+        """Enregistre la connexion d'un capteur"""
         try:
-            vote_data = json.loads(payload.decode())
-            suspect_id = vote_data.get("suspect")
+            data = json.loads(payload.decode())
+            ip = data.get("ip", "inconnue")
 
-            if not suspect_id or suspect_id not in self.capteurs_ids:
-                print(f"[SERVEUR] Vote invalide de {capteur_id} : suspect={suspect_id}")
-                return
+            if capteur_id in self.capteurs_ids and capteur_id not in self.capteurs_connectes:
+                self.capteurs_connectes.add(capteur_id)
+                print(f"[SERVEUR] Capteur connecté : {capteur_id} (IP: {ip})")
+                print(f"[SERVEUR] Capteurs connectés : {len(self.capteurs_connectes)}/{len(self.capteurs_ids)}")
 
-            capteur_ip = self.capteurs_ips.get(capteur_id, "IP inconnue")
-            suspect_ip = self.capteurs_ips.get(suspect_id, "IP inconnue")
-
-            print(f"[SERVEUR] Vote reçu de {capteur_id} ({capteur_ip}) : accuse {suspect_id} ({suspect_ip})")
-            
-            self.votes[capteur_id] = suspect_id
-            self.nb_votes_recus += 1
-
-            # Analyse des résultats lorsque tous les votes sont reçus
-            if self.nb_votes_recus >= len(self.capteurs_ids):
-                self.determiner_gagnant()
+                # Démarrer la partie si tous les capteurs sont connectés
+                if len(self.capteurs_connectes) == len(self.capteurs_ids) and not self.partie_en_cours:
+                    self.demarrer_partie()
 
         except Exception as e:
-            print(f"[SERVEUR] Erreur lors du traitement du vote de {capteur_id} : {e}")
+            print(f"[SERVEUR] Erreur traitement présence : {e}")
 
-    def demarrer_jeu(self):
-        """
-        Initialise une nouvelle partie du jeu :
-        - Sélectionne un espion aléatoirement
-        - Envoie la configuration aux capteurs
-        - Attribue les rôles
-        """
+    def demarrer_partie(self):
+        """Démarre une nouvelle partie du jeu"""
         self.partie_en_cours = True
         
         print("\n" + "="*70)
-        print("[SERVEUR] DÉMARRAGE D'UNE NOUVELLE PARTIE")
+        print("[SERVEUR] DÉMARRAGE DE LA PARTIE")
         print("="*70)
 
-        # Sélection aléatoire de l'espion
+        # Sélectionner un espion aléatoire
         self.espion_id = random.choice(self.capteurs_ids)
-        espion_ip = self.capteurs_ips[self.espion_id]
-        print(f"[SERVEUR] Espion désigné secrètement : {self.espion_id} ({espion_ip})")
+        print(f"[SERVEUR] Espion désigné : {self.espion_id}")
+        print(f"[SERVEUR] (Cette information est secrète)")
 
-        # Envoi de la configuration du jeu à tous les capteurs
-        config_jeu = {
+        # Envoyer la configuration à tous les capteurs
+        config_message = json.dumps({
             "capteurs": self.capteurs_ids,
             "villes_coords": self.villes_coords,
-            "capteurs_ips": self.capteurs_ips,
-            "timestamp": time.time()
-        }
-        self.client.publish("iot/config", json.dumps(config_jeu), qos=1, retain=False)
-        print(f"[SERVEUR] Configuration du jeu envoyée")
+            "capteurs_ips": self.capteurs_ips
+        })
+        self.client.publish("iot/config", config_message, qos=1, retain=True)
+        print("[SERVEUR] Configuration envoyée")
 
-        # Pause pour s'assurer que la configuration est reçue
-        time.sleep(2)
+        # Attendre un peu pour s'assurer que tous les capteurs ont reçu la config
+        time.sleep(1)
 
-        # Attribution des rôles individuels
-        print("\n[SERVEUR] Attribution des rôles :")
+        # Attribuer les rôles
         for capteur_id in self.capteurs_ids:
             role = "espion" if capteur_id == self.espion_id else "normal"
-            coords = self.villes_coords[capteur_id]
-            ip = self.capteurs_ips[capteur_id]
-
-            message = json.dumps({
+            role_message = json.dumps({
                 "role": role,
-                "latitude": coords[0],
-                "longitude": coords[1],
                 "timestamp": time.time()
             })
-
             topic = f"iot/role/{capteur_id}"
-            self.client.publish(topic, message, qos=1, retain=False)
+            self.client.publish(topic, role_message, qos=1, retain=True)
 
-            role_display = "ESPION" if role == "espion" else "Normal"
-            print(f"  {capteur_id} ({ip:15s}) -> Rôle: {role_display}, Coordonnées: {coords}")
-            time.sleep(0.3)
-
-        print("\n[SERVEUR] Phase de publication des températures en cours...")
-        print("[SERVEUR] Attente des votes (après 5 publications)...\n")
-
-    def determiner_gagnant(self):
-        """
-        Analyse les votes et détermine le gagnant de la partie.
-        Affiche les résultats détaillés.
-        """
-        print("\n" + "="*70)
-        print("[SERVEUR] ANALYSE DES RÉSULTATS")
-        print("="*70)
-
-        # Comptage des votes pour chaque suspect
-        comptage = {}
-        for capteur_id, suspect_id in self.votes.items():
-            comptage[suspect_id] = comptage.get(suspect_id, 0) + 1
-
-        # Affichage de la répartition des votes
-        print(f"[SERVEUR] Répartition des votes :")
-        for suspect_id, nb_votes in sorted(comptage.items(), key=lambda x: x[1], reverse=True):
-            suspect_ip = self.capteurs_ips.get(suspect_id, "IP inconnue")
-            marqueur = " <-- ESPION RÉEL" if suspect_id == self.espion_id else ""
-            print(f"           {suspect_id} ({suspect_ip:15s}): {nb_votes} vote(s){marqueur}")
-
-        # Identification du suspect le plus accusé
-        suspect_designe = max(comptage, key=comptage.get)
-        suspect_ip = self.capteurs_ips[suspect_designe]
-        espion_ip = self.capteurs_ips[self.espion_id]
-
-        print(f"\n[SERVEUR] Suspect désigné par la majorité : {suspect_designe} ({suspect_ip})")
-        print(f"[SERVEUR] Espion réel : {self.espion_id} ({espion_ip})")
-
-        # Détermination du vainqueur
-        print("\n" + "="*70)
-        if suspect_designe == self.espion_id:
-            print("[SERVEUR] ✓ VICTOIRE DES CAPTEURS !")
-            print("[SERVEUR] L'espion a été correctement identifié.")
-        else:
-            print("[SERVEUR] ✗ VICTOIRE DE L'ESPION !")
-            print("[SERVEUR] Les capteurs ont accusé le mauvais suspect.")
+        print("[SERVEUR] Rôles attribués")
+        print("[SERVEUR] Phase de publication des températures en cours...")
         print("="*70 + "\n")
 
-        # Réinitialisation pour une nouvelle partie
-        self.reinitialiser_partie()
+    def traiter_vote(self, capteur_id, payload):
+        """Enregistre un vote reçu d'un capteur"""
+        try:
+            data = json.loads(payload.decode())
+            suspect = data["suspect"]
 
-    def reinitialiser_partie(self):
-        """
-        Réinitialise l'état du serveur pour permettre une nouvelle partie.
-        """
+            if capteur_id not in self.votes:
+                self.votes[capteur_id] = suspect
+                self.nb_votes_recus += 1
+
+                print(f"[SERVEUR] Vote reçu de {capteur_id} : {suspect}")
+                print(f"[SERVEUR] Votes reçus : {self.nb_votes_recus}/{len(self.capteurs_ids)}")
+
+                # Si tous les votes sont reçus, calculer le résultat
+                if self.nb_votes_recus == len(self.capteurs_ids):
+                    self.calculer_resultat()
+
+        except Exception as e:
+            print(f"[SERVEUR] Erreur traitement vote : {e}")
+
+    def calculer_resultat(self):
+        """Analyse les votes et détermine le gagnant"""
+        print("\n" + "="*70)
+        print("[SERVEUR] RÉSULTATS DE LA PARTIE")
+        print("="*70)
+
+        # Compter les votes
+        compteur_votes = {}
+        for capteur_id, suspect in self.votes.items():
+            compteur_votes[suspect] = compteur_votes.get(suspect, 0) + 1
+
+        print("\n[SERVEUR] Décompte des votes :")
+        for suspect, nb_votes in sorted(compteur_votes.items(), key=lambda x: x[1], reverse=True):
+            marqueur = " <-- ESPION" if suspect == self.espion_id else ""
+            print(f"[SERVEUR]   {suspect} : {nb_votes} vote(s){marqueur}")
+
+        # Déterminer le suspect le plus voté
+        suspect_designe = max(compteur_votes, key=compteur_votes.get)
+        nb_votes_max = compteur_votes[suspect_designe]
+
+        print(f"\n[SERVEUR] Capteur le plus suspecté : {suspect_designe} ({nb_votes_max} votes)")
+        print(f"[SERVEUR] Espion réel : {self.espion_id}")
+
+        # Déterminer le gagnant
+        if suspect_designe == self.espion_id:
+            print("\n[SERVEUR] RÉSULTAT : Les capteurs ont gagné !")
+            print("[SERVEUR] L'espion a été correctement identifié.")
+        else:
+            print("\n[SERVEUR] RÉSULTAT : L'espion a gagné !")
+            print("[SERVEUR] Les capteurs n'ont pas réussi à l'identifier.")
+
+        print("="*70)
+
+        # Réinitialiser pour une nouvelle partie
+        self.reinitialiser()
+
+    def reinitialiser(self):
+        """Réinitialise l'état du serveur pour une nouvelle partie"""
+        self.espion_id = None
         self.votes = {}
         self.nb_votes_recus = 0
-        self.espion_id = None
         self.capteurs_connectes = set()
         self.partie_en_cours = False
-        
-        print("[SERVEUR] Système réinitialisé, en attente de nouveaux capteurs...\n")
+
+        print("\n[SERVEUR] Système réinitialisé")
+        print("[SERVEUR] Prêt pour une nouvelle partie\n")
 
     def executer(self):
-        """Lance le serveur arbitre"""
-        print("="*70)
-        print(f"[SERVEUR] Démarrage du serveur arbitre sur {self.broker_address}")
-        print("="*70)
-        
+        """Lance l'exécution du serveur arbitre"""
+        print("[SERVEUR] Démarrage du serveur arbitre")
+        print(f"[SERVEUR] Broker MQTT : {self.broker_address}:{self.broker_port}\n")
+
         try:
             self.client.connect(self.broker_address, self.broker_port, 60)
             self.client.loop_forever()
         except KeyboardInterrupt:
-            print("\n[SERVEUR] Arrêt du serveur arbitre")
+            print("\n[SERVEUR] Arrêt du serveur")
             self.client.disconnect()
         except Exception as e:
-            print(f"[SERVEUR] Erreur fatale : {e}")
+            print(f"[SERVEUR] Erreur : {e}")
             self.client.disconnect()
 
 

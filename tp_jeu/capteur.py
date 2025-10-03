@@ -1,4 +1,3 @@
-# capteur.py (version où l'espion ne vote pas contre lui-même)
 import paho.mqtt.client as mqtt
 import requests
 import time
@@ -7,24 +6,127 @@ import random
 import sys
 import threading
 from collections import defaultdict
-from statistics import mean, variance
+import numpy as np
 
 # Forcer l'encodage UTF-8 pour la sortie console
 if sys.stdout.encoding != 'utf-8':
     sys.stdout.reconfigure(encoding='utf-8')
 
 
+class GenerateurTemperatureEspion:
+    """
+    Générateur de températures aberrantes utilisant la loi de Poisson.
+    
+    Principe :
+    - Utilise une distribution de Poisson pour créer des températures irréalistes
+    - Lambda élevé pour générer des valeurs aberrantes
+    - Transformation pour obtenir des températures dans une plage aberrante
+    """
+
+    def __init__(self, lambda_poisson=15, offset=-10, scale=3.5):
+        """
+        Initialise le générateur avec les paramètres de la loi de Poisson.
+        
+        Args:
+            lambda_poisson: Paramètre lambda de la distribution de Poisson (moyenne)
+            offset: Décalage de base pour les températures
+            scale: Facteur d'échelle pour l'amplitude des variations
+        """
+        self.lambda_poisson = lambda_poisson
+        self.offset = offset
+        self.scale = scale
+        
+        print(f"[ESPION] Générateur de Poisson initialisé")
+        print(f"[ESPION] Paramètres : lambda={lambda_poisson}, offset={offset}, scale={scale}")
+
+    def generer_temperature_aberrante(self):
+        """
+        Génère une température aberrante selon une loi de Poisson.
+        
+        Formule : T = offset + scale * Poisson(lambda)
+        
+        Cette méthode génère des valeurs qui :
+        - Sont mathématiquement cohérentes (suivent une distribution)
+        - Restent aberrantes par rapport aux températures réelles
+        - Varient de manière imprévisible mais structurée
+        
+        Returns:
+            float: Température aberrante en degrés Celsius
+        """
+        # Tirer une valeur selon la loi de Poisson
+        valeur_poisson = np.random.poisson(self.lambda_poisson)
+        
+        # Transformer en température aberrante
+        temperature = self.offset + (self.scale * valeur_poisson)
+        
+        # Arrondir à 1 décimale
+        temperature = round(temperature, 1)
+        
+        # S'assurer que la température reste dans une plage aberrante mais plausible
+        # (éviter des valeurs physiquement impossibles comme -273°C)
+        temperature = max(-50.0, min(60.0, temperature))
+        
+        return temperature
+
+    def generer_temperature_avec_perturbation(self, temperature_base=None):
+        """
+        Génère une température aberrante avec une composante de perturbation.
+        
+        Si une température de base est fournie, ajoute une perturbation issue
+        de la loi de Poisson pour créer des variations crédibles mais suspectes.
+        
+        Args:
+            temperature_base: Température de référence (optionnelle)
+            
+        Returns:
+            float: Température aberrante
+        """
+        if temperature_base is None:
+            return self.generer_temperature_aberrante()
+        
+        # Générer une perturbation selon Poisson
+        perturbation = np.random.poisson(self.lambda_poisson)
+        
+        # Appliquer la perturbation (positif ou négatif aléatoirement)
+        signe = random.choice([-1, 1])
+        temperature = temperature_base + (signe * self.scale * perturbation)
+        
+        temperature = round(temperature, 1)
+        temperature = max(-50.0, min(60.0, temperature))
+        
+        return temperature
+
+    def afficher_statistiques(self, nb_echantillons=1000):
+        """
+        Affiche les statistiques de la distribution générée (pour debug).
+        
+        Args:
+            nb_echantillons: Nombre d'échantillons à générer pour l'analyse
+        """
+        echantillons = [self.generer_temperature_aberrante() for _ in range(nb_echantillons)]
+        
+        moyenne = np.mean(echantillons)
+        ecart_type = np.std(echantillons)
+        minimum = np.min(echantillons)
+        maximum = np.max(echantillons)
+        
+        print(f"[ESPION] Statistiques de la distribution (n={nb_echantillons}) :")
+        print(f"[ESPION]   Moyenne : {moyenne:.2f}°C")
+        print(f"[ESPION]   Écart-type : {ecart_type:.2f}°C")
+        print(f"[ESPION]   Min : {minimum:.1f}°C, Max : {maximum:.1f}°C")
+
+
 class AnalyseurIA:
     """
-    Agent d'analyse utilisant Ollama pour détecter l'espion
-    en analysant les données de température collectées.
+    Agent d'analyse utilisant Ollama pour détecter l'espion.
+    Toute la logique d'analyse est déléguée au LLM.
     """
 
     def __init__(self, ollama_url="http://10.103.1.12:11434"):
         self.ollama_url = ollama_url
         self.modele = "gemma3:4b"
-        self.timeout_requete = 45
-        
+        self.timeout_requete = 60
+
         # Test de connectivité au démarrage
         self.ollama_disponible = self._tester_connexion()
 
@@ -32,265 +134,302 @@ class AnalyseurIA:
         """Teste la connectivité au serveur Ollama."""
         try:
             response = requests.get(f"{self.ollama_url}/api/tags", timeout=5)
-            return response.status_code == 200
-        except:
+            if response.status_code == 200:
+                print("[IA] Connexion à Ollama établie avec succès")
+                return True
+            return False
+        except Exception as e:
+            print(f"[IA] Ollama indisponible : {e}")
             return False
 
-    def _appeler_ollama(self, prompt, timeout=45):
-        """Appelle l'API Ollama pour obtenir une réponse."""
+    def _appeler_ollama(self, prompt, timeout=60):
+        """Appelle l'API Ollama pour obtenir une analyse complète."""
         try:
             payload = {
                 "model": self.modele,
                 "prompt": prompt,
                 "stream": False,
                 "options": {
-                    "temperature": 0.3,
-                    "top_p": 0.9
+                    "temperature": 0.2,  # Plus déterministe
+                    "top_p": 0.85,
+                    "num_predict": 512   # Permettre une réponse détaillée
                 }
             }
-            
+
             response = requests.post(
                 f"{self.ollama_url}/api/generate",
                 json=payload,
                 timeout=timeout
             )
-            
+
             if response.status_code == 200:
                 return response.json().get("response", "")
             return None
-        except:
+        except Exception as e:
+            print(f"[IA] Erreur lors de l'appel Ollama : {e}")
             return None
 
-    def _construire_contexte_statistique(self, mon_id, mes_temps, autres_temps):
-        """Construit un contexte statistique clair pour le LLM."""
-        # Calculer la moyenne globale
-        toutes_valeurs = list(mes_temps)
-        for capteur_id, temps in autres_temps.items():
-            if capteur_id != mon_id and temps:
-                toutes_valeurs.extend(temps)
-
-        moyenne_globale = mean(toutes_valeurs) if toutes_valeurs else 0
-
-        contexte = f"MOYENNE GLOBALE : {moyenne_globale:.1f}°C\n\n"
-        contexte += "DONNÉES PAR CAPTEUR :\n"
-
-        # Analyser tous les capteurs
-        tous_capteurs = {mon_id: mes_temps}
-        tous_capteurs.update(autres_temps)
-
-        for capteur_id in sorted(tous_capteurs.keys()):
-            temps = tous_capteurs[capteur_id]
-            if temps and len(temps) > 0:
-                moy = mean(temps)
-                var = variance(temps) if len(temps) > 1 else 0
-                ecart_global = abs(moy - moyenne_globale)
-                
-                contexte += f"  • {capteur_id} : "
-                contexte += f"Moy={moy:.1f}°C, Variance={var:.1f}, Écart={ecart_global:.1f}°C\n"
-                contexte += f"    Valeurs : {[round(t, 1) for t in temps]}\n"
-
-        return contexte
-
-    def analyser_espion(self, mon_id, mes_temperatures, temperatures_autres, je_suis_espion=False):
+    def _construire_prompt_detective(self, mon_id, mes_temps, autres_temps, capteurs_ips):
         """
-        Analyse toutes les données collectées et désigne l'espion.
-        
+        Construit un prompt détaillé pour que le LLM joue le rôle de détective.
+        Le LLM reçoit TOUTES les données brutes et doit tout analyser lui-même.
+        """
+        prompt = f"""Tu es un DÉTECTIVE EXPERT en cybersécurité IoT. Tu dois identifier un espion parmi des capteurs de température.
+
+CONTEXTE DU SYSTÈME :
+- Réseau de 4 capteurs IoT (rpi1, rpi2, rpi3, rpi4) surveillant la météo
+- Chaque capteur mesure la température dans une ville proche (climat similaire)
+- UN SEUL capteur est un ESPION qui transmet des données FALSIFIÉES
+- Les capteurs normaux publient des températures COHÉRENTES entre elles
+- L'espion utilise une LOI DE POISSON pour générer des valeurs ABERRANTES
+- Distribution de Poisson : génère des valeurs qui suivent un pattern mathématique spécifique
+
+TA MISSION :
+Analyse les données de température ci-dessous et identifie l'espion avec certitude.
+
+DONNÉES COLLECTÉES :
+
+"""
+
+        # Ajouter les données de TOUS les capteurs (moi + les autres)
+        prompt += f"Capteur {mon_id} (IP: {capteurs_ips.get(mon_id, 'inconnue')}) - MOI\n"
+        prompt += f"  Températures publiées : {mes_temps}\n\n"
+
+        for capteur_id in sorted(autres_temps.keys()):
+            temps = autres_temps[capteur_id]
+            ip = capteurs_ips.get(capteur_id, 'inconnue')
+            prompt += f"Capteur {capteur_id} (IP: {ip})\n"
+            prompt += f"  Températures reçues : {temps}\n\n"
+
+        prompt += """
+MÉTHODOLOGIE D'ANALYSE ATTENDUE :
+
+1. Cohérence géographique : Les capteurs sont dans des villes proches
+   -> Leurs températures doivent être SIMILAIRES (écart max environ 5 degrés C)
+
+2. Stabilité temporelle : Une vraie température évolue PROGRESSIVEMENT
+   -> Variations brusques = SUSPECT
+
+3. Plage de valeurs : Températures réalistes en Europe
+   -> Valeurs aberrantes (-20 degrés C, 35 degrés C en hiver) = ESPION
+
+4. Pattern de distribution de Poisson : L'espion utilise une loi mathématique
+   -> Chercher des patterns inhabituels, des variations trop régulières ou trop extrêmes
+   -> La loi de Poisson peut créer des clusters de valeurs élevées ou faibles
+
+5. Analyse comparative : Compare TOUS les capteurs entre eux
+   -> L'espion sera celui qui DIVERGE systématiquement des autres
+
+6. Analyse statistique : Examine la distribution des valeurs
+   -> Écart-type anormal, moyenne décalée, outliers récurrents
+
+INDICES SPÉCIFIQUES POUR DÉTECTER LA LOI DE POISSON :
+- Valeurs qui varient de manière imprévisible mais avec une structure sous-jacente
+- Températures qui ne suivent pas la progression logique jour/nuit
+- Écarts importants entre valeurs successives
+- Présence de valeurs extrêmes (très chaudes ou très froides)
+
+CONTRAINTES IMPORTANTES :
+- Tu DOIS analyser TOUS les capteurs (y compris {mon_id})
+- Tu DOIS justifier ton choix avec des PREUVES CHIFFRÉES
+- Si les données sont ambiguës, choisis le capteur le PLUS SUSPECT
+
+FORMAT DE RÉPONSE OBLIGATOIRE (JSON strict) :
+{{
+  "suspect": "rpiX",
+  "confiance": 0.XX,
+  "preuves": [
+    "Preuve 1 avec chiffres",
+    "Preuve 2 avec chiffres",
+    "Preuve 3 avec chiffres"
+  ],
+  "analyse_comparative": "Résumé de la comparaison entre tous les capteurs"
+}}
+
+RÈGLES :
+- "suspect" doit être : rpi1, rpi2, rpi3 ou rpi4
+- "confiance" doit être entre 0.0 et 1.0 (ex: 0.85)
+- "preuves" doit contenir 2 à 4 arguments factuels avec chiffres
+- Réponds UNIQUEMENT avec le JSON, rien d'autre
+
+Commence ton analyse maintenant :"""
+
+        return prompt
+
+    def analyser_espion(self, mon_id, mes_temperatures, temperatures_autres, capteurs_ips, je_suis_espion=False):
+        """
+        Délègue l'analyse complète au LLM.
+
         Args:
             mon_id: Identifiant du capteur effectuant l'analyse
             mes_temperatures: Liste des températures publiées par ce capteur
             temperatures_autres: Dict {capteur_id: [températures]}
-            je_suis_espion: Booléen indiquant si ce capteur est l'espion
-        
+            capteurs_ips: Mapping des IPs des capteurs
+            je_suis_espion: Si True, vote stratégique au hasard
+
         Returns:
-            dict: {"suspect": "rpiX", "confiance": 0.0-1.0, "justification": "..."}
+            dict: {"suspect": "rpiX", "confiance": 0.XX, "preuves": [...]}
         """
-        # Si ce capteur est l'espion, il désigne un autre capteur au hasard
+        # Si ce capteur est l'espion, il accuse un autre capteur au hasard
         if je_suis_espion:
             return self._vote_espion(mon_id, list(temperatures_autres.keys()))
-        
-        if not self.ollama_disponible:
-            print(f"[{mon_id}] Ollama indisponible, utilisation de l'analyse statistique")
-            return self._analyse_fallback(mon_id, temperatures_autres)
 
-        # Construire le contexte
-        contexte_stats = self._construire_contexte_statistique(
-            mon_id, mes_temperatures, temperatures_autres
+        # Vérifier la disponibilité d'Ollama
+        if not self.ollama_disponible:
+            print(f"[{mon_id}] ATTENTION : Ollama indisponible, vote aléatoire")
+            return self._vote_aleatoire(mon_id, list(temperatures_autres.keys()))
+
+        print(f"[{mon_id}] Consultation du détective IA...")
+        print(f"[{mon_id}] Données à analyser :")
+        print(f"[{mon_id}]    - Mes températures : {mes_temperatures}")
+        for cid, temps in sorted(temperatures_autres.items()):
+            print(f"[{mon_id}]    - {cid} : {temps}")
+
+        # Construire le prompt pour le LLM
+        prompt = self._construire_prompt_detective(
+            mon_id, mes_temperatures, temperatures_autres, capteurs_ips
         )
 
-        # Construire le prompt
-        prompt = f"""Tu es un système expert en détection d'anomalies pour capteurs IoT.
-
-    CONTEXTE :
-    - 4 capteurs (rpi1, rpi2, rpi3, rpi4) mesurent la température dans des villes proches
-    - L'un des capteurs est un ESPION qui transmet des données falsifiées
-    - Les températures normales devraient être cohérentes entre elles
-
-    {contexte_stats}
-
-    MISSION :
-    Identifie quel capteur est l'espion en analysant :
-    1. Les écarts par rapport à la moyenne globale
-    2. La variance des mesures (espion = plus irrégulier)
-    3. Les valeurs aberrantes
-
-    IMPORTANT :
-    - Réponds UNIQUEMENT avec un JSON valide
-    - Format EXACT : {{"suspect": "rpiX", "confiance": 0.85, "justification": "raison claire"}}
-    - La confiance doit être entre 0.0 et 1.0
-    - Le suspect doit être rpi1, rpi2, rpi3 ou rpi4
-
-    Analyse :"""
-
         try:
-            print(f"[{mon_id}] Analyse en cours avec Ollama...")
-            
-            # Appel à Ollama
+            # Appel au LLM
+            print(f"[{mon_id}] Analyse en cours (timeout: {self.timeout_requete}s)...")
             reponse_brute = self._appeler_ollama(prompt, timeout=self.timeout_requete)
-            
+
             if not reponse_brute:
-                print(f"[{mon_id}] Pas de réponse d'Ollama, utilisation de l'analyse statistique")
-                return self._analyse_fallback(mon_id, temperatures_autres)
-            
-            # Extraction du JSON
+                print(f"[{mon_id}] Pas de réponse du LLM, vote aléatoire")
+                return self._vote_aleatoire(mon_id, list(temperatures_autres.keys()))
+
+            print(f"[{mon_id}] Réponse reçue du LLM\n")
+
+            # Extraire et valider le JSON
             analyse = self._extraire_json(reponse_brute)
-            
+
             if analyse and self._valider_analyse(analyse):
                 # Normaliser la confiance
-                if isinstance(analyse["confiance"], str):
-                    try:
-                        conf_str = analyse["confiance"].replace('%', '').replace(',', '.')
-                        analyse["confiance"] = float(conf_str) / 100 if float(conf_str) > 1 else float(conf_str)
-                    except:
-                        analyse["confiance"] = 0.5
+                analyse["confiance"] = self._normaliser_confiance(analyse["confiance"])
                 
-                analyse["confiance"] = max(0.0, min(1.0, float(analyse["confiance"])))
-                
+                print(f"[{mon_id}] Analyse validée par le LLM")
                 return analyse
             else:
-                print(f"[{mon_id}] Analyse invalide, utilisation de l'analyse statistique")
-                return self._analyse_fallback(mon_id, temperatures_autres)
-                
+                print(f"[{mon_id}] ATTENTION : Réponse invalide du LLM, vote aléatoire")
+                print(f"[{mon_id}] Réponse brute : {reponse_brute[:200]}...")
+                return self._vote_aleatoire(mon_id, list(temperatures_autres.keys()))
+
         except Exception as e:
-            print(f"[{mon_id}] Erreur d'analyse : {type(e).__name__}, utilisation de l'analyse statistique")
-            return self._analyse_fallback(mon_id, temperatures_autres)
+            print(f"[{mon_id}] ERREUR critique : {type(e).__name__} - {e}")
+            return self._vote_aleatoire(mon_id, list(temperatures_autres.keys()))
 
     def _vote_espion(self, mon_id, autres_capteurs_ids):
-        """
-        Stratégie de vote de l'espion : accuser un autre capteur au hasard
-        pour essayer de brouiller les pistes.
-        
-        Args:
-            mon_id: ID du capteur espion
-            autres_capteurs_ids: Liste des IDs des autres capteurs
-        
-        Returns:
-            dict: Vote de l'espion contre un autre capteur
-        """
+        """Vote stratégique de l'espion : accuser un autre capteur au hasard."""
         if not autres_capteurs_ids:
-            # Au cas où (ne devrait pas arriver)
             return {
                 "suspect": "rpi1",
-                "confiance": 0.5,
-                "justification": "Vote stratégique de l'espion"
+                "confiance": 0.6,
+                "preuves": ["Vote stratégique de l'espion"],
+                "analyse_comparative": "Tentative de brouillage"
             }
-        
-        # Choisir un autre capteur au hasard
+
         suspect = random.choice(autres_capteurs_ids)
-        
-        print(f"[{mon_id}] [ESPION] Stratégie : accuser un autre capteur")
-        print(f"[{mon_id}] [ESPION] Cible choisie : {suspect}")
-        
+
+        print(f"[{mon_id}] [ESPION] Accusation stratégique : {suspect}")
+
         return {
             "suspect": suspect,
-            "confiance": 0.7,  # Confiance modérée pour paraître crédible
-            "justification": "Données incohérentes détectées (vote stratégique)"
+            "confiance": 0.65,
+            "preuves": [
+                f"Détection d'incohérences dans les données de {suspect}",
+                "Écarts significatifs observés"
+            ],
+            "analyse_comparative": "Vote de perturbation stratégique"
+        }
+
+    def _vote_aleatoire(self, mon_id, autres_capteurs_ids):
+        """Vote de secours aléatoire si le LLM ne répond pas."""
+        if not autres_capteurs_ids:
+            return {
+                "suspect": "rpi1",
+                "confiance": 0.25,
+                "preuves": ["Analyse par défaut (LLM indisponible)"],
+                "analyse_comparative": "Vote aléatoire de secours"
+            }
+
+        suspect = random.choice(autres_capteurs_ids)
+
+        return {
+            "suspect": suspect,
+            "confiance": 0.25,
+            "preuves": ["Vote aléatoire (LLM indisponible)"],
+            "analyse_comparative": "Analyse de secours"
         }
 
     def _extraire_json(self, texte):
-        """Extrait le JSON de la réponse d'Ollama."""
+        """Extrait le JSON de la réponse du LLM."""
         import re
-        
-        # Chercher un bloc JSON
-        match = re.search(r'\{[^{}]*"suspect"[^{}]*\}', texte)
+
+        # Méthode 1 : Chercher un bloc JSON complet
+        match = re.search(r'\{[^{}]*"suspect"[^{}]*\}', texte, re.DOTALL)
         if match:
             try:
                 return json.loads(match.group(0))
             except:
                 pass
+
+        # Méthode 2 : Chercher entre accolades les plus externes
+        debut = texte.find('{')
+        fin = texte.rfind('}')
+        if debut != -1 and fin != -1 and debut < fin:
+            try:
+                return json.loads(texte[debut:fin+1])
+            except:
+                pass
+
         return None
 
     def _valider_analyse(self, analyse):
         """Valide qu'une analyse contient tous les champs requis."""
         if not isinstance(analyse, dict):
             return False
-        
-        champs_requis = ["suspect", "confiance", "justification"]
+
+        # Vérifier les champs obligatoires
+        champs_requis = ["suspect", "confiance"]
         if not all(k in analyse for k in champs_requis):
             return False
-        
+
         # Vérifier que le suspect est valide
         if not isinstance(analyse["suspect"], str) or not analyse["suspect"].startswith("rpi"):
             return False
-        
+
+        # Ajouter les champs manquants si nécessaire
+        if "preuves" not in analyse:
+            analyse["preuves"] = ["Analyse du LLM"]
+        if "analyse_comparative" not in analyse:
+            analyse["analyse_comparative"] = "Analyse effectuée"
+
         return True
 
-    def _analyse_fallback(self, mon_id, temperatures_autres):
-        """
-        Analyse de secours basée sur des statistiques simples.
-        Identifie le capteur avec le plus grand écart à la moyenne.
-        
-        Args:
-            mon_id: ID du capteur effectuant l'analyse
-            temperatures_autres: Dict des températures des autres capteurs
-        """
-        if not temperatures_autres:
-            # Choisir un capteur au hasard parmi les autres
-            capteurs_possibles = [f"rpi{i}" for i in range(1, 5) if f"rpi{i}" != mon_id]
-            return {
-                "suspect": random.choice(capteurs_possibles) if capteurs_possibles else "rpi1",
-                "confiance": 0.3,
-                "justification": "Analyse par défaut (aucune donnée)"
-            }
+    def _normaliser_confiance(self, confiance):
+        """Normalise la valeur de confiance entre 0.0 et 1.0."""
+        if isinstance(confiance, str):
+            try:
+                # Retirer les symboles % et convertir
+                conf_str = confiance.replace('%', '').replace(',', '.').strip()
+                confiance = float(conf_str)
+                
+                # Si > 1, considérer comme pourcentage
+                if confiance > 1:
+                    confiance = confiance / 100
+            except:
+                return 0.5
 
-        # Calculer la moyenne globale
-        toutes_valeurs = []
-        for temps in temperatures_autres.values():
-            toutes_valeurs.extend(temps)
-        
-        moyenne_globale = mean(toutes_valeurs) if toutes_valeurs else 0
-
-        # Trouver le capteur avec le plus grand écart
-        ecarts = {}
-        for capteur_id, temps in temperatures_autres.items():
-            if temps:
-                moy_capteur = mean(temps)
-                ecarts[capteur_id] = abs(moy_capteur - moyenne_globale)
-
-        if ecarts:
-            suspect = max(ecarts, key=ecarts.get)
-            ecart_max = ecarts[suspect]
-            confiance = min(0.9, ecart_max / 10)  # Confiance basée sur l'écart
-            
-            return {
-                "suspect": suspect,
-                "confiance": confiance,
-                "justification": f"Écart maximal à la moyenne : {ecart_max:.1f}°C"
-            }
-        else:
-            # Choisir un capteur au hasard parmi les autres
-            capteurs_possibles = [f"rpi{i}" for i in range(1, 5) if f"rpi{i}" != mon_id]
-            return {
-                "suspect": random.choice(capteurs_possibles) if capteurs_possibles else "rpi1",
-                "confiance": 0.3,
-                "justification": "Analyse statistique par défaut"
-            }
+        # Limiter entre 0 et 1
+        return max(0.0, min(1.0, float(confiance)))
 
 
 class CapteurTemperature:
     """
-    Capteur de température IoT avec capacité de détection d'anomalies.
-    Peut jouer le rôle de capteur normal ou d'espion selon l'attribution du serveur.
-    Utilise l'IA pour analyser les données et identifier l'espion.
+    Capteur de température IoT avec détection d'espion par IA.
+    Toute l'analyse est déléguée au LLM via Ollama.
+    L'espion utilise une distribution de Poisson pour générer des températures aberrantes.
     """
 
     def __init__(self, capteur_id, broker_address="10.109.150.133", broker_port=1883):
@@ -318,7 +457,14 @@ class CapteurTemperature:
         self.nb_publications = 0
         self.MAX_PUBLICATIONS = 5
 
-        # Agent IA pour l'analyse
+        # Générateur de températures pour l'espion (loi de Poisson)
+        self.generateur_espion = GenerateurTemperatureEspion(
+            lambda_poisson=15,  # Paramètre lambda de la distribution
+            offset=-10,         # Température de base
+            scale=3.5           # Facteur d'échelle
+        )
+
+        # Agent IA pour l'analyse (délégation complète)
         self.analyseur = AnalyseurIA(ollama_url="http://10.103.1.12:11434")
 
         # Synchronisation
@@ -352,161 +498,192 @@ class CapteurTemperature:
             client.subscribe(f"iot/role/{self.capteur_id}")
             client.subscribe("iot/capteurs/+/temperature")
 
-            # Signaler sa présence au serveur
-            presence_message = json.dumps({
-                "capteur_id": self.capteur_id,
-                "ip": self.mon_ip,
-                "timestamp": time.time()
-            })
-            client.publish(f"iot/capteurs/{self.capteur_id}/presence", presence_message, qos=1)
+            # Signaler la présence
+            presence_msg = json.dumps({"ip": self.mon_ip, "timestamp": time.time()})
+            client.publish(f"iot/capteurs/{self.capteur_id}/presence", presence_msg, qos=1, retain=True)
+
+            print(f"[{self.capteur_id}] En attente de la configuration...")
         else:
-            print(f"[{self.capteur_id}] Échec de connexion, code : {rc}")
+            print(f"[{self.capteur_id}] ERREUR de connexion (code: {rc})")
 
     def on_message(self, client, userdata, msg):
         """Callback appelé lors de la réception d'un message MQTT."""
         try:
-            payload = msg.payload.decode('utf-8')
+            # Ignorer les messages vides (nettoyage)
+            if len(msg.payload) == 0:
+                return
+
             topic_parts = msg.topic.split('/')
 
-            # Réception de la configuration du jeu
+            # Configuration du système
             if msg.topic == "iot/config":
-                config = json.loads(payload)
-                self.tous_capteurs = config.get("capteurs", [])
-                self.villes_coords = config.get("villes_coords", {})
-                self.capteurs_ips = config.get("capteurs_ips", {})
-                self.config_recue = True
+                self.traiter_configuration(msg.payload)
 
-                print(f"[{self.capteur_id}] Configuration reçue : {len(self.tous_capteurs)} capteurs")
-
-            # Réception du rôle attribué
+            # Attribution du rôle
             elif topic_parts[1] == "role" and topic_parts[2] == self.capteur_id:
-                role_data = json.loads(payload)
-                self.role = role_data.get("role")
-                self.ma_latitude = role_data.get("latitude")
-                self.ma_longitude = role_data.get("longitude")
-                self.role_recu = True
+                self.traiter_role(msg.payload)
 
-                role_display = "ESPION" if self.role == "espion" else "Normal"
-                print(f"\n{'='*60}")
-                print(f"[{self.capteur_id}] Rôle attribué : {role_display}")
-                print(f"[{self.capteur_id}] Coordonnées : ({self.ma_latitude}, {self.ma_longitude})")
-                print(f"{'='*60}\n")
-
-                # Démarrer la publication des températures
-                threading.Thread(target=self.publier_temperatures, daemon=True).start()
-
-            # Réception d'une température d'un autre capteur
+            # Réception des températures des autres capteurs
             elif topic_parts[1] == "capteurs" and topic_parts[3] == "temperature":
-                autre_capteur_id = topic_parts[2]
+                capteur_source = topic_parts[2]
+                if capteur_source != self.capteur_id:
+                    self.traiter_temperature_recue(capteur_source, msg.payload)
 
-                if autre_capteur_id != self.capteur_id:
-                    temp_data = json.loads(payload)
-                    temperature = temp_data.get("temperature")
-
-                    with self.lock:
-                        self.temperatures_recues[autre_capteur_id].append(temperature)
-
-                    autre_ip = self.capteurs_ips.get(autre_capteur_id, "IP inconnue")
-                    print(f"[{self.capteur_id}] Reçu de {autre_capteur_id} ({autre_ip}) : {temperature}°C")
-
-        except json.JSONDecodeError as e:
-            print(f"[{self.capteur_id}] Erreur JSON sur {msg.topic}: {e}")
         except Exception as e:
             print(f"[{self.capteur_id}] Erreur traitement message : {e}")
 
-    def obtenir_temperature_api(self, latitude, longitude):
-        """Récupère la température actuelle depuis l'API Open-Meteo."""
+    def traiter_configuration(self, payload):
+        """Traite le message de configuration envoyé par le serveur."""
         try:
-            url = (f"https://api.open-meteo.com/v1/forecast?"
-                   f"latitude={latitude}&longitude={longitude}&current_weather=true")
-            response = requests.get(url, timeout=10)
-            data = response.json()
-            temperature = data["current_weather"]["temperature"]
-            return round(temperature, 1)
-        except Exception as e:
-            print(f"[{self.capteur_id}] Erreur API Open-Meteo : {e}")
-            return 15.0
+            config = json.loads(payload.decode())
+            
+            with self.lock:
+                self.tous_capteurs = config["capteurs"]
+                self.villes_coords = {k: tuple(v) for k, v in config["villes_coords"].items()}
+                self.capteurs_ips = config["capteurs_ips"]
+                
+                # Récupérer mes coordonnées
+                if self.capteur_id in self.villes_coords:
+                    self.ma_latitude, self.ma_longitude = self.villes_coords[self.capteur_id]
+                
+                self.config_recue = True
 
-    def generer_temperature_espion(self):
+            print(f"[{self.capteur_id}] Configuration reçue")
+            print(f"[{self.capteur_id}] Ma position : ({self.ma_latitude}, {self.ma_longitude})")
+            
+            self.demarrer_si_pret()
+
+        except Exception as e:
+            print(f"[{self.capteur_id}] Erreur configuration : {e}")
+
+    def traiter_role(self, payload):
+        """Traite l'attribution du rôle par le serveur."""
+        try:
+            role_data = json.loads(payload.decode())
+            
+            with self.lock:
+                self.role = role_data["role"]
+                self.role_recu = True
+
+            if self.role == "espion":
+                print(f"[{self.capteur_id}] ========================================")
+                print(f"[{self.capteur_id}] RÔLE ASSIGNÉ : ESPION")
+                print(f"[{self.capteur_id}] Mission : Publier des températures aberrantes")
+                print(f"[{self.capteur_id}] Méthode : Distribution de Poisson")
+                print(f"[{self.capteur_id}] ========================================")
+                
+                # Afficher les statistiques du générateur (optionnel)
+                # self.generateur_espion.afficher_statistiques()
+            else:
+                print(f"[{self.capteur_id}] Rôle assigné : Capteur normal")
+                print(f"[{self.capteur_id}] Mission : Détecter l'espion")
+
+            self.demarrer_si_pret()
+
+        except Exception as e:
+            print(f"[{self.capteur_id}] Erreur traitement rôle : {e}")
+
+    def traiter_temperature_recue(self, capteur_source, payload):
+        """Enregistre une température reçue d'un autre capteur."""
+        try:
+            data = json.loads(payload.decode())
+            temperature = data["temperature"]
+
+            with self.lock:
+                self.temperatures_recues[capteur_source].append(temperature)
+
+        except Exception as e:
+            print(f"[{self.capteur_id}] Erreur réception température : {e}")
+
+    def demarrer_si_pret(self):
+        """Démarre la publication si configuration et rôle sont reçus."""
+        with self.lock:
+            if self.config_recue and self.role_recu and self.nb_publications == 0:
+                print(f"[{self.capteur_id}] Démarrage de la phase de publication")
+                threading.Thread(target=self.publier_temperatures, daemon=True).start()
+
+    def obtenir_temperature(self):
         """
-        Génère une température falsifiée suivant une loi normale.
-        Utilise la température réelle comme moyenne avec un écart-type de 3°C.
+        Récupère une température selon le rôle du capteur.
+        
+        Returns:
+            float: Température en degrés Celsius
         """
-        temp_reelle = self.obtenir_temperature_api(self.ma_latitude, self.ma_longitude)
-        ecart_type = 3.0
-        temp_falsifiee = random.gauss(temp_reelle, ecart_type)
-        return round(temp_falsifiee, 1)
+        if self.role == "espion":
+            # Utiliser la loi de Poisson pour générer une température aberrante
+            temp = self.generateur_espion.generer_temperature_aberrante()
+            return temp
+        else:
+            # Température réaliste via API Open-Meteo
+            try:
+                url = f"https://api.open-meteo.com/v1/forecast"
+                params = {
+                    "latitude": self.ma_latitude,
+                    "longitude": self.ma_longitude,
+                    "current_weather": "true"
+                }
+                
+                response = requests.get(url, params=params, timeout=10)
+                if response.status_code == 200:
+                    data = response.json()
+                    temp = data["current_weather"]["temperature"]
+                    return round(temp, 1)
+                else:
+                    # Fallback : température par défaut
+                    return 10.0
+            except Exception as e:
+                print(f"[{self.capteur_id}] Erreur API météo : {e}")
+                return 10.0
 
     def publier_temperatures(self):
-        """
-        Publie une température toutes les 5 secondes.
-        Température réelle si rôle normal, falsifiée si espion.
-        """
-        time.sleep(1)
-        print(f"[{self.capteur_id}] Début de la publication des températures\n")
+        """Publie 5 températures espacées de 5 secondes."""
+        print(f"[{self.capteur_id}] {'='*60}")
+        print(f"[{self.capteur_id}] PHASE DE PUBLICATION")
+        print(f"[{self.capteur_id}] {'='*60}\n")
 
-        while self.nb_publications < self.MAX_PUBLICATIONS:
-            # Générer la température selon le rôle
-            if self.role == "espion":
-                temperature = self.generer_temperature_espion()
-            else:
-                temperature = self.obtenir_temperature_api(self.ma_latitude, self.ma_longitude)
+        for i in range(self.MAX_PUBLICATIONS):
+            temperature = self.obtenir_temperature()
 
-            # Publier la température
-            message = json.dumps({
-                "temperature": temperature,
-                "timestamp": time.time()
-            })
-            topic = f"iot/capteurs/{self.capteur_id}/temperature"
-            self.client.publish(topic, message, qos=1)
-
+            # Enregistrer ma température
             with self.lock:
                 self.mes_temperatures_publiees.append(temperature)
                 self.nb_publications += 1
 
-            print(f"[{self.capteur_id}] Publié : {temperature}°C "
-                  f"[{self.nb_publications}/{self.MAX_PUBLICATIONS}]")
+            # Publier sur MQTT
+            message = json.dumps({
+                "temperature": temperature,
+                "timestamp": time.time(),
+                "publication_num": i + 1
+            })
 
-            time.sleep(5)
+            topic = f"iot/capteurs/{self.capteur_id}/temperature"
+            self.client.publish(topic, message, qos=1, retain=False)
 
-        self.publication_terminee = True
-        print(f"\n[{self.capteur_id}] Publication terminée\n")
+            if self.role == "espion":
+                print(f"[{self.capteur_id}] [ESPION] Publication {i+1}/5 : {temperature}°C (Poisson)")
+            else:
+                print(f"[{self.capteur_id}] Publication {i+1}/5 : {temperature}°C")
 
-        # Attendre les données des autres capteurs
-        self.attendre_toutes_temperatures()
+            if i < self.MAX_PUBLICATIONS - 1:
+                time.sleep(5)
 
-        # Analyser avec l'IA et voter
-        self.phase_analyse_ia()
-
-    def attendre_toutes_temperatures(self):
-        """Attend que toutes les températures des autres capteurs soient reçues."""
-        nb_capteurs_attendus = len(self.tous_capteurs) - 1
-        print(f"[{self.capteur_id}] Attente des températures des autres capteurs...")
-
-        temps_attente = 0
-        temps_max = 30
-
-        while temps_attente < temps_max:
-            with self.lock:
-                nb_recus = len([c for c in self.temperatures_recues.keys() 
-                               if len(self.temperatures_recues[c]) >= self.MAX_PUBLICATIONS])
-
-            if nb_recus >= nb_capteurs_attendus:
-                print(f"[{self.capteur_id}] Toutes les températures reçues ({nb_recus}/{nb_capteurs_attendus})")
-                return
-
-            time.sleep(1)
-            temps_attente += 1
-
+        # Marquer la fin de la publication
         with self.lock:
-            nb_recus = len([c for c in self.temperatures_recues.keys() 
-                           if len(self.temperatures_recues[c]) >= self.MAX_PUBLICATIONS])
-        print(f"[{self.capteur_id}] Timeout : {nb_recus}/{nb_capteurs_attendus} températures reçues")
+            self.publication_terminee = True
 
-    def phase_analyse_ia(self):
+        print(f"\n[{self.capteur_id}] Publications terminées")
+        print(f"[{self.capteur_id}] Attente de réception des données des autres capteurs...\n")
+
+        # Attendre un peu pour recevoir toutes les données
+        time.sleep(3)
+
+        # Lancer l'analyse
+        self.analyser_et_voter()
+
+    def analyser_et_voter(self):
         """
-        Phase d'analyse avec IA pour identifier l'espion et voter.
-        L'espion accusera un autre capteur pour brouiller les pistes.
+        Analyse les températures collectées en déléguant au LLM.
+        Si espion : vote aléatoire pour brouiller les pistes.
         """
         print(f"\n[{self.capteur_id}] {'='*60}")
         print(f"[{self.capteur_id}] PHASE D'ANALYSE AVEC IA")
@@ -525,6 +702,7 @@ class CapteurTemperature:
             self.capteur_id,
             mes_temperatures,
             temperatures_autres,
+            self.capteurs_ips,
             je_suis_espion=je_suis_espion
         )
 
@@ -535,7 +713,10 @@ class CapteurTemperature:
         else:
             print(f"[{self.capteur_id}] Suspect identifié : {analyse['suspect']}")
             print(f"[{self.capteur_id}] Confiance : {analyse['confiance']:.0%}")
-            print(f"[{self.capteur_id}] Justification : {analyse['justification']}\n")
+            print(f"[{self.capteur_id}] Justification :")
+            for preuve in analyse.get('preuves', []):
+                print(f"[{self.capteur_id}]   - {preuve}")
+            print()
 
         # Voter pour le suspect identifié
         self.voter(analyse['suspect'])
@@ -575,7 +756,7 @@ if __name__ == "__main__":
         sys.exit(1)
 
     capteur_id = sys.argv[1]
-    
+
     ids_valides = ["rpi1", "rpi2", "rpi3", "rpi4"]
     if capteur_id not in ids_valides:
         print(f"ID invalide. Utilisez : {', '.join(ids_valides)}")
