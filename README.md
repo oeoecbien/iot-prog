@@ -71,4 +71,4 @@ python tp_jeu/capteur.py rpi1
 
 ## Auteur
 
-Projet pédagogique IoT - Détection d'espion par analyse collaborative et
+Projet pédagogique IoT
